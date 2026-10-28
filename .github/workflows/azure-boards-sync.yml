@@ -1,0 +1,46 @@
+name: Sync issues to Azure Boards
+
+on:
+  issues:
+    types: [opened, edited, closed, reopened, labeled, unlabeled]
+  workflow_dispatch:
+    inputs:
+      issue_number:
+        description: Issue number to diagnose or reconcile (current state is used)
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: azure-boards-${{ github.repository }}-${{ github.event.issue.number || inputs.issue_number }}
+  cancel-in-progress: false
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      issues: write
+    steps:
+      - name: Check out trusted default-branch helper
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event.repository.default_branch }}
+          persist-credentials: false
+          sparse-checkout: .github/scripts
+      - name: Synchronize current issue
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+          AZURE_DEVOPS_PAT: ${{ secrets.AZURE_DEVOPS_PAT }}
+          AZURE_DEVOPS_ORGANIZATION: ${{ vars.AZURE_DEVOPS_ORGANIZATION }}
+          AZURE_DEVOPS_PROJECT: ${{ vars.AZURE_DEVOPS_PROJECT }}
+          AZURE_DEVOPS_WORK_ITEM_TYPE: ${{ vars.AZURE_DEVOPS_WORK_ITEM_TYPE }}
+          AZURE_DEVOPS_SYNC_LABEL: ${{ vars.AZURE_DEVOPS_SYNC_LABEL }}
+          AZURE_DEVOPS_OPEN_STATE: ${{ vars.AZURE_DEVOPS_OPEN_STATE }}
+          AZURE_DEVOPS_CLOSED_STATE: ${{ vars.AZURE_DEVOPS_CLOSED_STATE }}
+          INPUT_ISSUE_NUMBER: ${{ inputs.issue_number }}
+        run: ./.github/scripts/Sync-AzureBoards.ps1

@@ -183,6 +183,158 @@ Microsoft Cloud for Financial Services provides capabilities to manage data to d
 </table>
 
 
+## GitHub Issues to Azure Boards
+
+> **Administrator prerequisite: Issues are currently disabled in AME06/industry.**
+> Enable **Settings → General → Features → Issues** before using this integration.
+> This change does not enable Issues, change repository settings, or provision Azure resources.
+
+The [workflow](.github/workflows/azure-boards-sync.yml) performs **one-way** synchronization
+from opted-in GitHub issues to Azure Boards. It copies title, safely HTML-encoded body
+(as preformatted text), source issue link, and mapped state. It preserves the GitHub issue
+body and unrelated Azure fields, tags, and relations. Azure edits never update GitHub.
+Comments, assignees, attachments, Markdown rendering, and arbitrary field mapping are not synced.
+The selected card's title, description, and state are owned by this integration, including
+when linking an existing card. Titles must be nonempty and at most 255 characters.
+
+### Installation and configuration
+
+1. Install the workflow and `.github/scripts/Sync-AzureBoards.ps1` on the repository's
+   **default branch** (`main`). Issue workflows require the default branch; the workflow
+   always checks out that branch's trusted helper, including for manual runs.
+2. In Azure DevOps, use a dedicated identity with access only to the intended organization,
+   project, and work items. Create a short-lived PAT with **Work Items: Read & write**
+   (`vso.work_write`), not Full access. Its identity must also be allowed to query/create/edit
+   work items in the project; the PAT scope does not grant those project permissions.
+3. Under **Settings → Secrets and variables → Actions**, create the repository secret and
+   repository variables below. Never put the PAT in a variable, issue, label, or source file.
+4. Allow GitHub Actions and the pinned official checkout action under repository/organization
+   policies. The workflow requests only `contents: read` for trusted checkout and `issues: write`
+   to read issues, timeline, collaborator permissions, and maintain its link comment.
+   No separate GitHub PAT, Azure login, or Azure resource deployment is needed.
+5. Create the enrollment label, enroll a test issue as described below, and inspect
+   **Actions → Sync issues to Azure Boards**. Use **Run workflow**, on the default branch,
+   with `issue_number` (a positive decimal number without leading zeroes) to diagnose
+   configuration or retry/reconcile an existing issue.
+
+| Kind | Exact name | Value |
+| --- | --- | --- |
+| Secret | `AZURE_DEVOPS_PAT` | Azure DevOps PAT; the only Azure credential |
+| Variable | `AZURE_DEVOPS_ORGANIZATION` | Organization **name**, e.g. `contoso`, not a URL or host |
+| Variable | `AZURE_DEVOPS_PROJECT` | Existing project **name**, not a project URL or GUID |
+| Variable | `AZURE_DEVOPS_WORK_ITEM_TYPE` | Optional; defaults to `Task` |
+| Variable | `AZURE_DEVOPS_SYNC_LABEL` | Optional; defaults to `azure-devops` |
+| Variable | `AZURE_DEVOPS_OPEN_STATE` | Required when configured; process-specific open/reopened state |
+| Variable | `AZURE_DEVOPS_CLOSED_STATE` | Required when configured; process-specific closed state |
+
+Supported work item types are `Task`, `Issue`, `User Story`, `Feature`, and `Epic`, using
+`System.Description`. They must exist in the chosen process. `Bug` and custom types with
+different description fields are deliberately unsupported. Choose state names that are
+valid for the selected type/process: for example, `New`/`Closed` **may** suit an Agile
+process, whereas a Task may use `To Do`/`Done`. These are illustrative, not universal
+defaults; configure and verify both states. Azure validation and transition rules remain
+enabled. Required custom fields or rules that cannot be satisfied by title/description/state
+must be handled in the process or by linking an appropriately prepared existing item;
+this integration does not bypass rules or support arbitrary fields.
+
+Leaving organization, project, and PAT all unset intentionally disables synchronization
+with a skip message. Partial configuration or missing state mappings produces a redacted
+configuration error. A successful skipped run is not proof of working Azure credentials:
+configure all settings and manually run an enrolled test issue to check the full path.
+
+### Enrollment and linking an existing card
+
+A repository maintainer with **write, maintain, or admin** permission must add the configured
+enrollment label (default `azure-devops`). This also enrolls older issues: a `labeled` event
+starts synchronization using the issue's **current** content/state. Unlabeled issues are
+skipped; removing the enrollment label pauses future sync without deleting either record.
+To resume, a maintainer re-adds it. Existing links are reused.
+
+To select an existing work item **before initial enrollment**, a maintainer adds exactly one
+label `ado:123` (replace `123` with the positive work item ID), then the enrollment label.
+The helper checks the latest label additions in the paginated issue timeline and verifies
+the actors' current repository permissions. An unauthorized label addition cannot enroll
+an issue or select an Azure target. Remove and re-add the label as a maintainer to repair
+an unauthorized addition. Malformed or multiple `ado:` labels fail closed. Use only a card
+in the configured organization and project that the Azure identity can read and edit.
+Once linked, labels cannot retarget an issue: keep `ado:123` unchanged or remove it.
+An invalid, deleted, moved, or inaccessible established target fails instead of creating
+a replacement. Changing organization/project after linking also requires operator review.
+Repository renames and issue transfers change the source identity and likewise require review.
+
+The bot posts a human-readable Azure link and canonical metadata in a comment. Only
+comments authored by the GitHub Actions bot's fixed identity are trusted; user-authored
+markers and issue-body markers cannot select a target. Do not edit/delete the bot comment,
+copy its marker between issues, or remove the `gh-issue:` ownership tag in Azure.
+
+### Trust model, retries, and recovery
+
+**Enrollment delegates ongoing content updates to the issue's editors.** After a maintainer
+enrolls an issue, its author (including an external contributor) may edit its title/body or
+close/reopen it, and those changes update the selected Azure card using the PAT identity.
+Only enroll issues whose editors you trust with that limited capability, especially when
+linking pre-existing cards. Removing enrollment stops future updates, but does not roll back
+updates already in flight. Syncing public issues into Azure does not make Azure content public;
+the bot's organization/project/item link is public on public issues. Do not put sensitive
+organization/project information in public link metadata.
+Protect default-branch code and other workflows with `issues: write`: they share the
+GitHub Actions bot identity and are part of the trusted computing base.
+
+The helper fetches current state rather than copying stale event payload content. Runs are
+serialized per issue without canceling an in-progress run. GitHub may replace pending runs
+in a concurrency group; each remaining run reads the latest state. Run manually after a
+burst of changes if needed. The script never executes issue text, follows credential-bearing
+redirects, or derives an API host from issue content. HTML is escaped, not trusted as markup.
+See GitHub's [script injection guidance](https://docs.github.com/en/actions/concepts/security/script-injections).
+
+Creation atomically includes a deterministic `gh-issue:` tag derived from the source issue URL.
+Before creating, the helper queries Azure for that tag and verifies exact matches and project
+ownership. This reconciles retries if Azure creation succeeded but the GitHub comment failed.
+Updates preserve unrelated tags and use a revision check to avoid overwriting concurrent Azure
+changes. Repeated events reuse the same item and bot link comment; multiple matches or
+conflicting links fail for human review, never pick an arbitrary card.
+
+This is **not exactly-once delivery**: GitHub and Azure do not share a transaction or uniqueness
+constraint. Lost responses, service outages, delayed query indexing, manually removed metadata,
+other workflows, or independent writers can leave an orphan or duplicate. Do not run multiple
+copies of the integration against the same source. If a run fails after a write, inspect the
+source link/tag in Azure and bot comments in GitHub before rerunning. If duplicates exist,
+resolve them manually and retain the correct ownership tag and bot mapping; do not blindly
+delete metadata or change labels to force creation. Changes made while the workflow is
+disabled are not backfilled automatically; manual runs reconcile individual issues.
+
+### Troubleshooting and offline tests
+
+* **No run:** enable Issues, install on the default branch, allow Actions, then add the
+  enrollment label as a maintainer or dispatch a run for that issue number.
+* **Skipped:** check all configuration, the current enrollment label, and the maintainer
+  who last added it. Non-enrolled issues intentionally do nothing.
+* **GitHub 403:** check Actions policy and the job's `issues: write` permission; permission
+  lookup and bot comments must be allowed. Do not broaden to unrelated scopes.
+* **Azure 401/403/404:** check organization/project name, target ownership, service identity
+  permissions, and PAT expiry/revocation. Rotate before expiry by replacing
+  `AZURE_DEVOPS_PAT`; revoke superseded tokens. Do not paste credentials or full HTTP dumps
+  into issue comments or logs. API failures expose only sanitized operation/status messages.
+* **Azure validation/revision error:** verify type, required fields and process-specific
+  state/transition rules, inspect the card, then retry. No `bypassRules` is used.
+* **Link/reconciliation conflict:** review bot metadata, timeline authorization, and exact
+  ownership tags in Azure. Missing/forbidden linked items never silently create replacements.
+
+The helper uses Azure DevOps REST **7.1**, including
+[work item updates](https://learn.microsoft.com/en-us/rest/api/azure/devops/wit/work-items/update?view=azure-devops-rest-7.1)
+with `application/json-patch+json`. This initial version supports GitHub.com and
+`https://dev.azure.com` (not GitHub Enterprise Server or alternate Azure hosts).
+
+With PowerShell 7.2+ and Pester 5 installed, from the repository root run:
+
+```powershell
+Invoke-Pester -Path ./.github/scripts/Sync-AzureBoards.Tests.ps1 -Output Detailed
+Invoke-ScriptAnalyzer -Path ./.github/scripts/Sync-AzureBoards.ps1 -Severity Warning,Error
+```
+
+Tests mock all HTTP calls and require no real tokens, Azure resources, or external mutations.
+Never use production credentials to run tests.
+
 ## Contributing
 
 This project welcomes contributions and suggestions.  Most contributions require you to agree to a
